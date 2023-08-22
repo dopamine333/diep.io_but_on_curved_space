@@ -60,8 +60,10 @@ class Bullet:
         up = self.vel*self.speed_inv
         right = self.map.rotate90(self.pos, up)
 
-        vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,right,up,self.radius)
-        camera.draw_polygon(self.color, vertex)
+        # vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,right,up,self.radius)
+        # camera.draw_polygon(self.color, vertex)
+        camera.draw_squeezable_circle(self.color, self.pos, right,up,self.radius)
+
 
         # draw line to show local coordinate
         coord_show_factor = self.radius
@@ -145,13 +147,23 @@ class Player:
         # print(f"up dot right: {self.map.dot(self.pos, self.up, self.right)}")
 
     def draw(self, camera: 'Camera'):
-        vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,self.right,self.up,self.radius)
-        camera.draw_polygon(self.color, vertex)
+        # vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,self.right,self.up,self.radius)
+        # camera.draw_polygon(self.color, vertex)
+        camera.draw_squeezable_circle(self.color, self.pos, self.right,self.up,self.radius)
 
         # draw line to show local coordinate
         coord_show_factor = self.radius
-        camera.draw_line( (255, 0, 0), self.pos, self.pos+self.up*coord_show_factor)
-        camera.draw_line( (0, 255, 0), self.pos, self.pos+self.right*coord_show_factor)
+        camera.draw_line( RED, self.pos, self.pos+self.up*coord_show_factor)
+        camera.draw_line( GREEN, self.pos, self.pos+self.right*coord_show_factor)
+
+        # draw shoot preview
+        screen_mouse_pos = pygame.mouse.get_pos()
+        world_mouse_pos = camera.screen_to_world(screen_mouse_pos)
+        direction = world_mouse_pos - self.pos
+        direction = self.map.normalize(self.pos, direction)
+        trajectory=self.map.geodesic(self.pos, direction, self.bullet_speed, 20)[:,:2]
+        camera.draw_lines(BLUE, False, trajectory)
+
 
 
 class Map:
@@ -321,16 +333,15 @@ class MapDrawer:
         up = self.map.rotate90(center,right)
         # geodesic.shape = (step,4)
         # geodesic = [(x1,y1,x1',y1'),(x2,y2,x2',y2'),...]
-        space_in_index = int(self.space/self.length*self.step)
+        space_in_index = round(self.space/self.length*self.step)
         if space_in_index == 0:
             space_in_index = 1
-
         half_length = self.length/2
-
+        half_step = round(self.step/2)+1
         x_axis = np.concatenate(
-            (self.map.geodesic(center,-right,half_length,self.step)[::-1],
-             self.map.geodesic(center,right,half_length,self.step)),axis=0)
-        self.curves.append(x_axis[:, :2]) 
+            (self.map.geodesic(center,-right,half_length,half_step)[:0:-1],
+             self.map.geodesic(center,right,half_length,half_step)),axis=0)
+        # self.curves.append(x_axis[:, :2]) 
         x_pos = x_axis[::space_in_index, :2]
         x_right = x_axis[::space_in_index, 2:]
         # print(x_axis.shape,x_pos.shape,x_right.shape)
@@ -338,24 +349,23 @@ class MapDrawer:
         x_up = self.map.rotate90(x_pos.T,x_right.T).T  
         # print(x_up.shape)
         # print(x_up)
-
         y_axis = np.concatenate(
-            (self.map.geodesic(center,-up,half_length,self.step)[::-1],
-             self.map.geodesic(center,up,half_length,self.step)),axis=0)
-        self.curves.append(y_axis[:, :2])
+            (self.map.geodesic(center,-up,half_length,half_step)[:0:-1],
+             self.map.geodesic(center,up,half_length,half_step)),axis=0)
+        # self.curves.append(y_axis[:, :2])
         y_pos = y_axis[::space_in_index, :2]
         y_up = y_axis[::space_in_index, 2:]
         y_right = -self.map.rotate90(y_pos.T,y_up.T).T
 
         for pos,up in zip(x_pos,x_up):
             vertical = np.concatenate(
-                (self.map.geodesic(pos,up,self.length,self.step)[::-1],
-                 self.map.geodesic(pos,-up,self.length,self.step)),axis=0)
+                (self.map.geodesic(pos,-up,half_length,half_step)[:0:-1],
+                 self.map.geodesic(pos,up,half_length,half_step)),axis=0)
             self.curves.append(vertical[:, :2])
         for pos,right in zip(y_pos,y_right):
             horizontal = np.concatenate(
-                (self.map.geodesic(pos,right,self.length,self.step)[::-1],
-                 self.map.geodesic(pos,-right,self.length,self.step)),axis=0)
+                (self.map.geodesic(pos,-right,half_length,half_step)[:0:-1],
+                 self.map.geodesic(pos,right,half_length,half_step)),axis=0)
             self.curves.append(horizontal[:, :2])
 
     def draw(self,camera:'Camera'):
@@ -458,6 +468,17 @@ class Camera:
         points = self.world_to_screen(points)
         pygame.draw.lines(self.screen, color, closed, points)
 
+    def draw_squeezable_circle(self,color,pos,right,up,radius):
+        pos = self.world_to_screen(pos)
+        right = right@self.world_to_screen_matrix
+        up = up@self.world_to_screen_matrix
+        # area = max(np.linalg.norm(right),np.linalg.norm(up))
+        # print("area_square",area)
+        # if area < 10:
+        #     return
+        vertex = SQUEEZABLE_CIRCLE.get_vertex(pos,right,up,radius)
+        pygame.draw.polygon(self.screen, color, vertex)
+
     def clear(self):
         self.screen.fill((50, 50, 60))
 
@@ -471,8 +492,13 @@ class FPS:
         self.text = None #self.font.render(str(self.clock.get_fps()), True, BLACK)
 
     def draw(self, screen):
-        self.text = self.font.render(str(round(self.clock.get_fps(),2)), True, WHITE)
+        self.text = self.font.render("FPS: "+str(round(self.clock.get_fps(),2)), True, WHITE)
         screen.blit(self.text, (200, 150))
+
+    def show_bullets(self, screen, bullets):
+        bullet_num_text="bullet number: "+str(len(bullets))
+        self.text = self.font.render(bullet_num_text, True, WHITE)
+        screen.blit(self.text, (400, 150))
 
 class Game:
     def __init__(self) -> None:
@@ -499,33 +525,33 @@ class Game:
         # endregion
         
         # region Poincaré half-plane
-        # self.width, self.height = 5, 5
-        # half_plane_metric = [[1/y**2,0],[0,1/y**2]]
-        # self.map = Map(x,y,sp.Matrix(half_plane_metric).tolist())
-        # self.player = Player(pos=np.array([1,1], dtype=np.float64),
-        #                      vel=np.array([0, 0], dtype=np.float64),
-        #                      speed=1,
-        #                      bullet_speed=2,
-        #                      bullet_radius=0.1,
-        #                      bullet_lifetime=10,
-        #                      map=self.map,
-        #                      color=(255, 255, 255),
-        #                      radius=0.2)
-        # endregion
-
-        # region Poincaré disk
-        self.width, self.height = 1, 1
-        disk_metric =sp.eye(2)*(4/(1-(x**2+y**2))**2)
-        self.map = Map(x,y,disk_metric.tolist())
-        self.player = Player(pos=np.array([0,0], dtype=np.float64),
+        self.width, self.height = 5, 5
+        half_plane_metric = [[1/y**2,0],[0,1/y**2]]
+        self.map = Map(x,y,sp.Matrix(half_plane_metric).tolist())
+        self.player = Player(pos=np.array([1,1], dtype=np.float64),
                              vel=np.array([0, 0], dtype=np.float64),
                              speed=1,
                              bullet_speed=2,
                              bullet_radius=0.1,
-                             bullet_lifetime=5,
+                             bullet_lifetime=10,
                              map=self.map,
                              color=(255, 255, 255),
                              radius=0.2)
+        # endregion
+
+        # region Poincaré disk
+        # self.width, self.height = 1, 1
+        # disk_metric =sp.eye(2)*(4/(1-(x**2+y**2))**2)
+        # self.map = Map(x,y,disk_metric.tolist())
+        # self.player = Player(pos=np.array([0,0], dtype=np.float64),
+        #                      vel=np.array([0, 0], dtype=np.float64),
+        #                      speed=0.2,
+        #                      bullet_speed=0.1,
+        #                      bullet_radius=0.1,
+        #                      bullet_lifetime=20,
+        #                      map=self.map,
+        #                      color=(255, 255, 255),
+        #                      radius=0.2)
         # endregion
 
         # region Torus
@@ -560,7 +586,7 @@ class Game:
         # endregion
         
         # 300 bullets -> fps 60
-        self.max_bullets = 100 
+        self.max_bullets = 1000
         self.bullets: list[Bullet] = []
 
         self.camera = Camera(
@@ -586,8 +612,8 @@ class Game:
         self.map_drawer = MapDrawer(
             map=self.map,
             step=20,
-            space=1,
-            length=5,
+            space=0.1,
+            length=1,
             color=GRAY
         )
         # self.map_drawer.generate(np.array([1,1]),np.array([1,0]))
@@ -679,13 +705,10 @@ class Game:
             for bullet in self.bullets:
                 bullet.draw(self.camera)
 
-            # self.fpstext.draw(self.camera.screen)
-            # # draw current bullet number
-            # bullet_num_text="bullet number: "+str(len(self.bullets))
-            # font = pygame.font.SysFont("Verdana", 20)
-            # text = font.render(bullet_num_text, True, WHITE)
-            # self.camera.screen.blit(text, (400, 150))
-            self.map_drawer.draw(self.camera)
+            self.fpstext.draw(self.camera.screen)
+            self.fpstext.show_bullets(self.camera.screen,self.bullets)
+            
+            # self.map_drawer.draw(self.camera)
 
             self.camera.draw()
 
@@ -693,20 +716,20 @@ class Game:
 
 
 if __name__ == '__main__':
-    # game = Game()
-    # game.run()
+    game = Game()
+    game.run()
 
-    import cProfile
-    import pstats
-    with cProfile.Profile() as pr:
-        game = Game()
-        game.run()
-    stats = pstats.Stats(pr)
-    stats.sort_stats(pstats.SortKey.TIME)
-    stats.print_stats()
-    # show use snakeviz
-    stats.dump_stats("profile.prof")
-    # snakeviz profile.prof
+    # import cProfile
+    # import pstats
+    # with cProfile.Profile() as pr:
+    #     game = Game()
+    #     game.run()
+    # stats = pstats.Stats(pr)
+    # stats.sort_stats(pstats.SortKey.TIME)
+    # stats.print_stats()
+    # # show use snakeviz
+    # stats.dump_stats("profile.prof")
+    # # snakeviz profile.prof
 
 
     # from scalene import scalene_profiler
