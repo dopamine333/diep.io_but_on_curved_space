@@ -19,7 +19,18 @@ class SqueezableCircle:
 
     def get_vertex(self,center:np.ndarray,right:np.ndarray,up:np.ndarray,radius:float):
         return center + (self.cos*right+self.sin*up)*radius
-SQUEEZABLE_CIRCLE = SqueezableCircle(30)
+    
+    def check_collision(self,map:'Map',
+                        center:np.ndarray,right:np.ndarray,up:np.ndarray,radius:float,
+                        other_center:np.ndarray,other_right:np.ndarray,other_up:np.ndarray,other_radius:float):
+        vertex = self.get_vertex(center,right,up,radius)
+        vector = vertex - other_center
+        vector = vector.T
+        in_other = map.dot(other_center,vector,vector) < other_radius**2
+        return np.any(in_other)
+    
+SQUEEZABLE_CIRCLE = SqueezableCircle(20)
+COLLISION_SQUEEZABLE_CIRCLE = SqueezableCircle(8)
 
 class Bullet:
     def __init__(self,
@@ -33,6 +44,9 @@ class Bullet:
         # vel is components of velocity in global coordinates
         self.vel = vel
         self.map = map
+        
+        self.up= self.map.normalize(self.pos, self.vel)
+        self.right = self.map.rotate90(self.pos, self.up)
 
         self.speed_inv = 1/np.sqrt(self.map.dot(self.pos, self.vel, self.vel))
 
@@ -42,14 +56,27 @@ class Bullet:
         self.lifetime = lifetime
         self.alive = True
 
-    def update(self, dt):
+    def update(self, dt,player: 'Player'):
+        if not self.alive:
+            return
         new_vel = self.map.parallel_transport(self.pos, self.vel, self.vel, dt)
         self.pos += self.vel*dt
         self.vel = new_vel
+        self.up = self.vel*self.speed_inv
+        self.right = self.map.rotate90(self.pos, self.up)
 
         self.lifetime -= dt
         if self.lifetime <= 0:
             self.alive = False
+
+        # check collision with player
+        if COLLISION_SQUEEZABLE_CIRCLE.check_collision(self.map,
+                                                self.pos, self.right, self.up, self.radius,
+                                                player.pos, player.right, player.up, player.radius):
+            self.color = RED # test
+        else:
+            self.color = WHITE # test
+
         # print pos round to 2 decimal places
         # print(f"pos: {self.pos.round(2)}")
         # print(f"vel len: {self.map.dot(self.pos, self.vel,self.vel)}")
@@ -57,12 +84,10 @@ class Bullet:
     def draw(self, camera: 'Camera'):
         # vel_factor = 0.5
         # up = self.map.normalize(self.pos, self.vel)
-        up = self.vel*self.speed_inv
-        right = self.map.rotate90(self.pos, up)
 
         # vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,right,up,self.radius)
         # camera.draw_polygon(self.color, vertex)
-        camera.draw_squeezable_circle(self.color, self.pos, right,up,self.radius)
+        camera.draw_squeezable_circle(self.color, self.pos, self.right,self.up,self.radius)
 
 
         # draw line to show local coordinate
@@ -157,12 +182,12 @@ class Player:
         camera.draw_line( GREEN, self.pos, self.pos+self.right*coord_show_factor)
 
         # draw shoot preview
-        screen_mouse_pos = pygame.mouse.get_pos()
-        world_mouse_pos = camera.screen_to_world(screen_mouse_pos)
-        direction = world_mouse_pos - self.pos
-        direction = self.map.normalize(self.pos, direction)
-        trajectory=self.map.geodesic(self.pos, direction, self.bullet_speed, 20)[:,:2]
-        camera.draw_lines(BLUE, False, trajectory)
+        # screen_mouse_pos = pygame.mouse.get_pos()
+        # world_mouse_pos = camera.screen_to_world(screen_mouse_pos)
+        # direction = world_mouse_pos - self.pos
+        # direction = self.map.normalize(self.pos, direction)
+        # trajectory=self.map.geodesic(self.pos, direction, self.bullet_speed, 20)[:,:2]
+        # camera.draw_lines(BLUE, False, trajectory)
 
 
 
@@ -500,6 +525,36 @@ class FPS:
         self.text = self.font.render(bullet_num_text, True, WHITE)
         screen.blit(self.text, (400, 150))
 
+class MouseCircle:
+    def __init__(self, camera:'Camera',map:'Map',player:'Player', pos, radius, original_color, collision_color    ):
+        self.pos = pos
+        self.radius = radius
+        self.color = original_color
+        self.original_color = original_color
+        self.collision_color = collision_color
+        self.up = np.array([0,1],dtype=np.float64)
+        self.right = np.array([1,0],dtype=np.float64)
+        
+        self.camera = camera
+        self.map = map
+        self.player = player
+
+    def update(self):
+        self.pos = self.camera.screen_to_world(pygame.mouse.get_pos())
+        self.right = self.map.normalize(self.pos,np.array([0,1],dtype=np.float64))
+        self.up = self.map.rotate90(self.pos,self.right)
+
+        # check collision with player
+        if COLLISION_SQUEEZABLE_CIRCLE.check_collision(self.map,
+            self.pos,self.right,self.up,self.radius,
+            self.player.pos,self.player.right,self.player.up,self.player.radius):
+            self.color = self.collision_color
+        else:
+            self.color = self.original_color
+
+    def draw(self, camera: 'Camera'):
+        camera.draw_squeezable_circle(self.color, self.pos, self.right, self.up, self.radius)
+
 class Game:
     def __init__(self) -> None:
         pygame.init()
@@ -515,8 +570,8 @@ class Game:
         # self.map = Map(x, y, sp.Matrix(sphere_metric).tolist())
         # self.player = Player(pos=np.array([1,1], dtype=np.float64),
         #                      vel=np.array([0, 0], dtype=np.float64),
-        #                      speed=1,
-        #                      bullet_speed=2,
+        #                      speed=2,
+        #                      bullet_speed=0.2,
         #                      bullet_radius=0.1,
         #                      bullet_lifetime=5,
         #                      map=self.map,
@@ -597,7 +652,6 @@ class Game:
         )
 
         self.fps = 200
-        self.dt = 1/self.fps
 
         self.star_num = 100
         self.star_pos_list = np.random.uniform(0, [self.width,self.height], (self.star_num, 2))
@@ -621,6 +675,16 @@ class Game:
         # self.map_drawer.generate(np.random.randn(2),np.random.randn(2))
         # self.map_drawer.generate(np.random.randn(2),np.random.randn(2))
 
+        self.mouse_circle = MouseCircle(
+            camera=self.camera,
+            map=self.map,
+            player=self.player,
+            pos=np.array([0,0],dtype=np.float64),
+            radius=0.1,
+            original_color=GREEN,
+            collision_color=RED
+        )
+
     def shoot(self):
         screen_mouse_pos = pygame.mouse.get_pos()
         world_mouse_pos = self.camera.screen_to_world(screen_mouse_pos)
@@ -632,104 +696,114 @@ class Game:
         world_mouse_pos = self.camera.screen_to_world(screen_mouse_pos)
         self.map_drawer.generate(self.player.pos,world_mouse_pos-self.player.pos)
 
-    def run(self):
-        while self.running:
-            self.clock.tick(self.fps)
-            # print(self.clock.get_fps())
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                # space down or mouse click-> shoot
-                bullet = None
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_SPACE:
-                        self.shoot()
-                    # r -> reset
-                    if event.key == pygame.K_r:
-                        self.player.restart( np.array([self.width/2, self.height/2], dtype=np.float64))
-                    # m -> draw map
-                    if event.key == pygame.K_m:
-                        self.draw_map()
-                if event.type == pygame.MOUSEBUTTONDOWN:
+    def process_input(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            # space down or mouse click-> shoot
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
                     self.shoot()
-
-
-            # wasd -> move up, left, down, right
-            move = np.array([0, 0])
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_w]:
-                move += np.array([0, 1])
-            if keys[pygame.K_a]:
-                move += np.array([-1, 0])
-            if keys[pygame.K_s]:
-                move += np.array([0, -1])
-            if keys[pygame.K_d]:
-                move += np.array([1, 0])
-            if np.linalg.norm(move) > 0:
-                move = move/np.linalg.norm(move)
-            self.player.move(move)
-
-            # eq -> zoom in or out
-            if keys[pygame.K_q]:
-                self.camera.zoom_in_or_out(0.99)
-            if keys[pygame.K_e]:
-                self.camera.zoom_in_or_out(1.01)
-
-            # b -> continuous shooting
-            if keys[pygame.K_b]:
+                # r -> reset
+                if event.key == pygame.K_r:
+                    self.player.restart( np.array([self.width/2, self.height/2], dtype=np.float64))
+                # m -> draw map
+                if event.key == pygame.K_m:
+                    self.draw_map()
+            if event.type == pygame.MOUSEBUTTONDOWN:
                 self.shoot()
 
-            self.player.update(self.dt)
+
+        # wasd -> move up, left, down, right
+        move = np.array([0, 0])
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_w]:
+            move += np.array([0, 1])
+        if keys[pygame.K_a]:
+            move += np.array([-1, 0])
+        if keys[pygame.K_s]:
+            move += np.array([0, -1])
+        if keys[pygame.K_d]:
+            move += np.array([1, 0])
+        if np.linalg.norm(move) > 0:
+            move = move/np.linalg.norm(move)
+        self.player.move(move)
+
+        # eq -> zoom in or out
+        if keys[pygame.K_q]:
+            self.camera.zoom_in_or_out(0.99)
+        if keys[pygame.K_e]:
+            self.camera.zoom_in_or_out(1.01)
+
+        # b -> continuous shooting
+        if keys[pygame.K_b]:
+            self.shoot()
+
+    def update(self,delta_time):
+        self.player.update(delta_time)
+        
+        if len(self.bullets) > self.max_bullets:
+            self.bullets=self.bullets[len(self.bullets)-self.max_bullets:]
+        to_del=[]
+        for bullet in self.bullets:
+            bullet.update(delta_time,self.player)
+            if not bullet.alive:
+                to_del.append(bullet)
+        for bullet in to_del:
+            self.bullets.remove(bullet)
+
+        self.camera.update(self.player)
+        self.mouse_circle.update()
+        
+    def draw(self):
+        self.camera.clear()
+        #draw star
+        # for pos,size in self.stars:
+        #     self.camera.draw_circle((200,200,200),pos,size)
+        self.camera.draw_circles((200,200,200),self.star_pos_list,self.star_size_list)
+
+        self.player.draw(self.camera)
+        for bullet in self.bullets:
+            bullet.draw(self.camera)
+
+        self.fpstext.draw(self.camera.screen)
+        self.fpstext.show_bullets(self.camera.screen,self.bullets)
+        
+        self.map_drawer.draw(self.camera)
+
+        self.mouse_circle.draw(self.camera)
+
+        self.camera.draw()
+
+    def run(self):
+        while self.running:
+            delta_time = self.clock.tick(self.fps)/1000
+            # print(self.clock.get_fps())
             
-            if len(self.bullets) > self.max_bullets:
-                self.bullets=self.bullets[len(self.bullets)-self.max_bullets:]
-            to_del=[]
-            for bullet in self.bullets:
-                bullet.update(self.dt)
-                if not bullet.alive:
-                    to_del.append(bullet)
-            for bullet in to_del:
-                self.bullets.remove(bullet)
+            self.process_input()
 
-            self.camera.update(self.player)
+            self.update(delta_time)
 
-            
-
-            self.camera.clear()
-            #draw star
-            # for pos,size in self.stars:
-            #     self.camera.draw_circle((200,200,200),pos,size)
-            self.camera.draw_circles((200,200,200),self.star_pos_list,self.star_size_list)
-
-            self.player.draw(self.camera)
-            for bullet in self.bullets:
-                bullet.draw(self.camera)
-
-            self.fpstext.draw(self.camera.screen)
-            self.fpstext.show_bullets(self.camera.screen,self.bullets)
-            
-            # self.map_drawer.draw(self.camera)
-
-            self.camera.draw()
+            self.draw()
 
         pygame.quit()
 
 
 if __name__ == '__main__':
-    game = Game()
-    game.run()
+    # game = Game()
+    # game.run()
 
-    # import cProfile
-    # import pstats
-    # with cProfile.Profile() as pr:
-    #     game = Game()
-    #     game.run()
-    # stats = pstats.Stats(pr)
-    # stats.sort_stats(pstats.SortKey.TIME)
+    import cProfile
+    import pstats
+    with cProfile.Profile() as pr:
+        game = Game()
+        game.run()
+    stats = pstats.Stats(pr)
+    stats.sort_stats(pstats.SortKey.TIME)
     # stats.print_stats()
-    # # show use snakeviz
-    # stats.dump_stats("profile.prof")
-    # # snakeviz profile.prof
+    # show use snakeviz
+    stats.dump_stats("profile.prof")
+    # snakeviz profile.prof
 
 
     # from scalene import scalene_profiler
