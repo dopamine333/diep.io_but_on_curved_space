@@ -298,6 +298,7 @@ class Map:
         
         def geodesic(pos,vel,time,step):
             t_run=np.linspace(0,time,step)
+            # print(pos,vel)
             return odeint(dSdt,(*pos,*vel),t_run)
         self.geodesic=geodesic
         return self.geodesic(pos,  vel, time, step)
@@ -312,27 +313,54 @@ class MapDrawer:
 
         self.curves = []
 
-    def generate(self,bottomleft,right):
+    def generate(self,center,right):
         # calculate x axis and y axis lines (geodesics)
         # on x axis every space, draw vertical lines
         # on y axis every space, draw horizontal lines
-        right = self.map.normalize(bottomleft,right)
-        up = self.map.rotate90(bottomleft,right)
-        x_axis = self.map.geodesic(bottomleft,right,self.length,self.step)        
-        y_axis = self.map.geodesic(bottomleft,up,self.length,self.step)
-        space_count = int(self.length/self.space)
-        for i in range(space_count):
-            pos = x_axis[int(i*self.step/space_count)]
-            vertical = self.map.geodesic(pos,up,self.length,self.step)
-            self.curves.append(vertical)
-        for i in range(space_count):
-            pos = y_axis[int(i*self.step/space_count)]
-            horizontal = self.map.geodesic(pos,right,self.length,self.step)
-            self.curves.append(horizontal)
+        right = self.map.normalize(center,right)
+        up = self.map.rotate90(center,right)
+        # geodesic.shape = (step,4)
+        # geodesic = [(x1,y1,x1',y1'),(x2,y2,x2',y2'),...]
+        space_in_index = int(self.space/self.length*self.step)
+        if space_in_index == 0:
+            space_in_index = 1
+
+        half_length = self.length/2
+
+        x_axis = np.concatenate(
+            (self.map.geodesic(center,-right,half_length,self.step)[::-1],
+             self.map.geodesic(center,right,half_length,self.step)),axis=0)
+        self.curves.append(x_axis[:, :2]) 
+        x_pos = x_axis[::space_in_index, :2]
+        x_right = x_axis[::space_in_index, 2:]
+        # print(x_axis.shape,x_pos.shape,x_right.shape)
+        # print(x_axis,x_pos,x_right)
+        x_up = self.map.rotate90(x_pos.T,x_right.T).T  
+        # print(x_up.shape)
+        # print(x_up)
+
+        y_axis = np.concatenate(
+            (self.map.geodesic(center,-up,half_length,self.step)[::-1],
+             self.map.geodesic(center,up,half_length,self.step)),axis=0)
+        self.curves.append(y_axis[:, :2])
+        y_pos = y_axis[::space_in_index, :2]
+        y_up = y_axis[::space_in_index, 2:]
+        y_right = -self.map.rotate90(y_pos.T,y_up.T).T
+
+        for pos,up in zip(x_pos,x_up):
+            vertical = np.concatenate(
+                (self.map.geodesic(pos,up,self.length,self.step)[::-1],
+                 self.map.geodesic(pos,-up,self.length,self.step)),axis=0)
+            self.curves.append(vertical[:, :2])
+        for pos,right in zip(y_pos,y_right):
+            horizontal = np.concatenate(
+                (self.map.geodesic(pos,right,self.length,self.step)[::-1],
+                 self.map.geodesic(pos,-right,self.length,self.step)),axis=0)
+            self.curves.append(horizontal[:, :2])
 
     def draw(self,camera:'Camera'):
         for curve in self.curves:
-            camera.draw_lines(self.color,curve)
+            camera.draw_lines(self.color,False,curve)
         
 class Camera:
     def __init__(self, pos, width, height, zoom=1):
@@ -471,33 +499,33 @@ class Game:
         # endregion
         
         # region Poincaré half-plane
-        self.width, self.height = 5, 5
-        half_plane_metric = [[1/y**2,0],[0,1/y**2]]
-        self.map = Map(x,y,sp.Matrix(half_plane_metric).tolist())
-        self.player = Player(pos=np.array([1,1], dtype=np.float64),
-                             vel=np.array([0, 0], dtype=np.float64),
-                             speed=1,
-                             bullet_speed=2,
-                             bullet_radius=0.1,
-                             bullet_lifetime=10,
-                             map=self.map,
-                             color=(255, 255, 255),
-                             radius=0.2)
-        # endregion
-
-        # region Poincaré disk
-        # self.width, self.height = 1, 1
-        # disk_metric =sp.eye(2)*(4/(1-(x**2+y**2))**2)
-        # self.map = Map(x,y,disk_metric.tolist())
-        # self.player = Player(pos=np.array([0, 0], dtype=np.float64),
+        # self.width, self.height = 5, 5
+        # half_plane_metric = [[1/y**2,0],[0,1/y**2]]
+        # self.map = Map(x,y,sp.Matrix(half_plane_metric).tolist())
+        # self.player = Player(pos=np.array([1,1], dtype=np.float64),
         #                      vel=np.array([0, 0], dtype=np.float64),
         #                      speed=1,
         #                      bullet_speed=2,
         #                      bullet_radius=0.1,
-        #                      bullet_lifetime=5,
+        #                      bullet_lifetime=10,
         #                      map=self.map,
         #                      color=(255, 255, 255),
         #                      radius=0.2)
+        # endregion
+
+        # region Poincaré disk
+        self.width, self.height = 1, 1
+        disk_metric =sp.eye(2)*(4/(1-(x**2+y**2))**2)
+        self.map = Map(x,y,disk_metric.tolist())
+        self.player = Player(pos=np.array([0,0], dtype=np.float64),
+                             vel=np.array([0, 0], dtype=np.float64),
+                             speed=1,
+                             bullet_speed=2,
+                             bullet_radius=0.1,
+                             bullet_lifetime=5,
+                             map=self.map,
+                             color=(255, 255, 255),
+                             radius=0.2)
         # endregion
 
         # region Torus
@@ -510,7 +538,7 @@ class Game:
         #                      speed=2,
         #                      bullet_speed=4,
         #                      bullet_radius=0.1,
-        #                      bullet_lifetime=5,
+        #                      bullet_lifetime=20,
         #                      map=self.map,
         #                      color=(255, 255, 255),
         #                     radius=0.2)
@@ -559,14 +587,24 @@ class Game:
             map=self.map,
             step=20,
             space=1,
-            length=10,
+            length=5,
             color=GRAY
         )
-        self.map_drawer.generate()
+        # self.map_drawer.generate(np.array([1,1]),np.array([1,0]))
+        self.map_drawer.generate(np.random.randn(2),np.random.randn(2))
+        # self.map_drawer.generate(np.random.randn(2),np.random.randn(2))
+        # self.map_drawer.generate(np.random.randn(2),np.random.randn(2))
+
     def shoot(self):
         screen_mouse_pos = pygame.mouse.get_pos()
         world_mouse_pos = self.camera.screen_to_world(screen_mouse_pos)
         self.bullets.append(self.player.shoot(world_mouse_pos))
+
+    def draw_map(self):
+        self.map_drawer.curves.clear()
+        screen_mouse_pos = pygame.mouse.get_pos()
+        world_mouse_pos = self.camera.screen_to_world(screen_mouse_pos)
+        self.map_drawer.generate(self.player.pos,world_mouse_pos-self.player.pos)
 
     def run(self):
         while self.running:
@@ -583,8 +621,12 @@ class Game:
                     # r -> reset
                     if event.key == pygame.K_r:
                         self.player.restart( np.array([self.width/2, self.height/2], dtype=np.float64))
+                    # m -> draw map
+                    if event.key == pygame.K_m:
+                        self.draw_map()
                 if event.type == pygame.MOUSEBUTTONDOWN:
                     self.shoot()
+
 
             # wasd -> move up, left, down, right
             move = np.array([0, 0])
@@ -625,6 +667,8 @@ class Game:
 
             self.camera.update(self.player)
 
+            
+
             self.camera.clear()
             #draw star
             # for pos,size in self.stars:
@@ -649,21 +693,20 @@ class Game:
 
 
 if __name__ == '__main__':
-    print(pygame.__package__)
-    print(pygame.__path__)
-    game = Game()
-    game.run()
-    # import cProfile
-    # import pstats
-    # with cProfile.Profile() as pr:
-    #     game = Game()
-    #     game.run()
-    # stats = pstats.Stats(pr)
-    # stats.sort_stats(pstats.SortKey.TIME)
-    # stats.print_stats()
-    # # show use snakeviz
-    # stats.dump_stats("profile.prof")
-    # # snakeviz profile.prof
+    # game = Game()
+    # game.run()
+
+    import cProfile
+    import pstats
+    with cProfile.Profile() as pr:
+        game = Game()
+        game.run()
+    stats = pstats.Stats(pr)
+    stats.sort_stats(pstats.SortKey.TIME)
+    stats.print_stats()
+    # show use snakeviz
+    stats.dump_stats("profile.prof")
+    # snakeviz profile.prof
 
 
     # from scalene import scalene_profiler
