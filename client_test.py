@@ -580,6 +580,7 @@ class Client:
         self.reader,self.writer = await asyncio.open_connection(
             self.host,
             self.port,
+            # limit=2
             # limit=self.buffer_limit
             )
 
@@ -597,14 +598,23 @@ class Client:
             # print(f"> header\t{header}")
         self.writer.write(data)
         await self.writer.drain()
+
+    async def read_until(self,length):
+        data = await self.reader.read(length)
+        while len(data) != length:
+            remaining = length - len(data)
+            # print(f"read remaining:  {length} - {len(data)} = {remaining}")
+            data += await self.reader.read(remaining)
+        return data
     
     async def recv(self):
-        header = await self.reader.read(self.header_length)
+        header = await self.read_until(self.header_length)
         if not header:
             return None
         event_length = int(header.decode('utf-8').strip())
-        event_dumps = await self.reader.read(event_length)
+        event_dumps = await self.read_until(event_length)            
         event = pickle.loads(event_dumps)
+
         if self.debug:
             self.recv_count += 1
             print()
@@ -622,21 +632,16 @@ class NetworkControllerWriter:
     async def process_input(self):
         # return False to quit
         inputs = {
-            # space
-            'jump':False,
-            # mouse button
-            'fire':False,
-            'mouse_pos':np.array([0,0],dtype=np.float64),
+            'trigger':[
+                # 'jump', 'fire'
+            ],
+            'mouse_pos':(0,0),
             # ad or left right
             'horizontal':0,
             # ws or up down
             'vertical':0,
-            'key_pressed':{
-                pygame.K_e:False,
-            },
-            'key_down':{
-                pygame.K_r:False,
-            }
+            'key_pressed':[],
+            'key_down':[],
         }
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -644,7 +649,8 @@ class NetworkControllerWriter:
             # space down or mouse click-> shoot
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
-                    inputs['jump'] = True
+                    inputs['trigger'].append('jump')
+
                     # inputs['key_down'][pygame.K_SPACE] = True
                 # r -> reset
                 # if event.key == pygame.K_r:
@@ -653,7 +659,9 @@ class NetworkControllerWriter:
                 # if event.key == pygame.K_m:
                 #     self.draw_map()
             if event.type == pygame.MOUSEBUTTONDOWN:
-                inputs['fire'] = True
+                if event.button == 1:
+                    inputs['trigger'].append('fire')
+                    # inputs['key_down'][pygame.K_b] = True
 
 
         # wasd -> move up, left, down, right
@@ -675,28 +683,27 @@ class NetworkControllerWriter:
 
         # eq -> zoom in or out
         if keys[pygame.K_q]:
-            inputs['key_pressed'][pygame.K_q] = True
+            inputs['key_pressed'].append(pygame.K_q)
             # self.zoom_in_or_out(0.99)
             # self.camera.zoom_in_or_out(0.99)
         if keys[pygame.K_e]:
-            inputs['key_pressed'][pygame.K_e] = True
+            inputs['key_pressed'].append(pygame.K_e)
             # self.zoom_in_or_out(1.01)
             # self.camera.zoom_in_or_out(1.01)
 
         # b -> continuous shooting
         if keys[pygame.K_b]:
-            inputs['fire'] = True
-            inputs['key_pressed'][pygame.K_b] = True
+            inputs['trigger'].append('fire')
+            inputs['key_pressed'].append(pygame.K_b)
             # self.shoot()
 
+        inputs['mouse_pos'] = pygame.mouse.get_pos()
 
-        mouse_pos = pygame.mouse.get_pos()
-        inputs['mouse_pos'] = np.array(mouse_pos,dtype=np.float64)
-        
         event = {
             'type':'inputs',
             'inputs':inputs
         }
+        # print(inputs)
         await self.client.send(event)
         return True
 
@@ -713,7 +720,7 @@ class NetworkSurfaceReader:
             self.process(event)
 
     def start_listen(self):
-        asyncio.create_task(self.listen())
+        return asyncio.create_task(self.listen())
 
     def process(self,event):
         # pygame.draw.line(self.screen, color, start, end)
@@ -744,7 +751,7 @@ class Game:
         self.screen_surface = pygame.display.set_mode((800, 600))
         self.screen = NetworkSurfaceReader(self.client,self.screen_surface)
 
-        self.fps = 10
+        self.fps = 120
 
     async def tick(self):
         delta_time = time.time()-self.current_time
@@ -753,7 +760,7 @@ class Game:
 
     async def run(self):
         await self.client.connect()
-        self.screen.start_listen()
+        listen_task = self.screen.start_listen()
         self.current_time = time.time()
         while self.running:
             
@@ -762,11 +769,15 @@ class Game:
                 self.running = False
 
             await self.tick()
+            # await asyncio.sleep(0)
 
+            if listen_task.done():
+                print(listen_task.exception())
+                self.running = False
             # self.draw()
             # listen draw event from server
             # or pygame.display.update()
-
+        listen_task.cancel()
         pygame.quit()
         # self.client.close()
 

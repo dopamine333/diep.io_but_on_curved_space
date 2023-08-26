@@ -57,6 +57,7 @@ class Bullet:
         self.speed_inv = 1/np.sqrt(self.map.dot(self.pos, self.vel, self.vel))
 
         self.color = color
+        self.current_color = color
         self.radius = radius
 
         self.lifetime = lifetime
@@ -77,6 +78,7 @@ class Bullet:
         if self.lifetime <= 0:
             self.alive = False
 
+        self.current_color = self.color
         
 
         # print pos round to 2 decimal places
@@ -90,9 +92,8 @@ class Bullet:
         if COLLISION_SQUEEZABLE_CIRCLE.check_collision(self.map,
                                                 self.pos, self.right, self.up, self.radius,
                                                 player.pos, player.right, player.up, player.radius):
-            self.color = RED # test
-        else:
-            self.color = WHITE # test
+            self.current_color = np.array(WHITE)-self.color
+
 
     def draw(self, camera: 'Camera'):
         # vel_factor = 0.5
@@ -100,7 +101,8 @@ class Bullet:
 
         # vertex = SQUEEZABLE_CIRCLE.get_vertex(self.pos,right,up,self.radius)
         # camera.draw_polygon(self.color, vertex)
-        camera.draw_squeezable_circle(self.color, self.pos, self.right,self.up,self.radius)
+        camera.draw_squeezable_circle(
+            self.current_color, self.pos, self.right,self.up,self.radius)
 
 
         # draw line to show local coordinate
@@ -132,7 +134,7 @@ class Player:
         self.bullet_lifetime = bullet_lifetime
 
         # local coordinate
-        self.up, self.right = self.random_orthogonal_coordinates()
+        self.right, self.up = self.random_orthogonal_coordinates()
 
         self.color = color
         self.radius = radius
@@ -165,24 +167,22 @@ class Player:
             pos=self.pos.copy(),
             vel=bullet_vel,
             map=self.map,
-            color=(255, 255, 255),
+            color=self.color,
             radius=self.bullet_radius,
             lifetime=self.bullet_lifetime,
             owner=self)
         self.game.add_bullet(bullet)
 
     def update(self, dt):
-        inputs = self.controller.get_inputs()
-        print(inputs)
-        shoot = inputs['fire'] or inputs['jump']
+        shoot = self.controller.get_jump() or self.controller.get_fire()
         if shoot:
-            print("shoot")
-            screen_mouse_pos = inputs['mouse_pos']
+            # print("shoot")
+            screen_mouse_pos = self.controller.get_mouse_pos()
             world_mouse_pos = self.camera.screen_to_world(screen_mouse_pos)
             self.shoot(world_mouse_pos)
 
-        x = inputs['horizontal']
-        y = inputs['vertical']
+        x = self.controller.get_horizontal()
+        y = self.controller.get_vertical()
         vel = self.speed * (x*self.right + y*self.up)
 
         self.up = self.map.parallel_transport(
@@ -204,8 +204,8 @@ class Player:
 
         # draw line to show local coordinate
         coord_show_factor = self.radius
-        camera.draw_line( RED, self.pos, self.pos+self.up*coord_show_factor)
-        camera.draw_line( GREEN, self.pos, self.pos+self.right*coord_show_factor)
+        camera.draw_line( RED, self.pos, self.pos+self.right*coord_show_factor)
+        camera.draw_line( GREEN, self.pos, self.pos+self.up*coord_show_factor)
 
         # draw shoot preview
         # screen_mouse_pos = pygame.mouse.get_pos()
@@ -309,7 +309,9 @@ class Map:
         u1 = v1/sp.sqrt((v1.T * sp.Matrix(self.metric) * v1)[0])
         u2 = v2/sp.sqrt((v2.T * sp.Matrix(self.metric) * v2)[0])
         M = sp.Matrix.hstack(u1, u2)
-        Rot = sp.Matrix([[0, -1], [1, 0]])
+        Rot = sp.Matrix(
+            [[0, -1], 
+             [1, 0]])
         R_tilde = M*Rot*M.inv()
         R_tilde.simplify()
         w1, w2 = sp.symbols('w1 w2')
@@ -439,10 +441,9 @@ class Camera:
 
 
     def update(self):
-        keys = self.controller.get_inputs()['key_pressed']
-        if keys.get(pygame.K_q,False):
+        if self.controller.get_key_pressed(pygame.K_q):
             self.zoom_in_or_out(0.99)
-        if keys.get(pygame.K_e,False):
+        if self.controller.get_key_pressed(pygame.K_e):
             self.zoom_in_or_out(1.01)
         self.pos = self.player.pos
         # player_to_world=np.vstack((player.up,player.right)).T
@@ -628,6 +629,7 @@ class Server:
         player = self.game.add_player(controller)
         camera = self.game.add_camera(player, screen, controller)
         player.set_camera(camera)
+        self.game.add_controller(controller)
         await controller.listen()
 
     def send(self,event,writer:'asyncio.StreamWriter'):
@@ -642,20 +644,29 @@ class Server:
             print(f"> type\t{event['type']}")
             print(f"> length\t{event_length}")
             # print(f"> header\t{header}")
+        # writer.write(data)
         self.send_buffer.append((writer,data))
 
     async def drain(self):
         while self.send_buffer:
             writer, data = self.send_buffer.pop(0)
             writer.write(data)
-            await writer.drain()
+            # await writer.drain()
+
+    async def read_until(self,length,reader:'asyncio.StreamReader'):
+        data = await reader.read(length)
+        while len(data) != length:
+            remaining = length - len(data)
+            print(f"read remaining:  {length} - {len(data)} = {remaining}")
+            data += await reader.read(remaining)
+        return data
 
     async def recv(self,reader:'asyncio.StreamReader'):
-        header = await reader.read(self.header_length)
+        header = await self.read_until(self.header_length,reader)
         if not header:
             return None
         event_length = int(header.decode('utf-8').strip())
-        event_dumps = await reader.read(event_length)
+        event_dumps = await self.read_until(event_length,reader)
         event = pickle.loads(event_dumps)
         if self.debug:
             self.recv_count += 1
@@ -748,22 +759,18 @@ class NetworkControllerReader:
         self.reader = reader
 
         self.inputs = {
-            # space
-            'jump':False,
-            # mouse button
-            'fire':False,
+            'trigger':[
+                # 'jump', 'fire'
+            ],
             'mouse_pos':None,
             # ad or left right
             'horizontal':0,
             # ws or up down
             'vertical':0,
-            'key_pressed':{
-                pygame.K_e:False,
-            },
-            'key_down':{
-                pygame.K_r:False,
-            }
+            'key_pressed':set(),
+            'key_down':set()
         }
+        self.inputs_queue = [self.inputs]
 
     async def listen(self):
         while True:
@@ -775,15 +782,43 @@ class NetworkControllerReader:
     def process(self,event):
         if event['type'] != 'inputs':
             return
-        self.inputs = event['inputs']
+        self.inputs_queue.append(event['inputs'])
 
-    def get_inputs(self):
-        return self.inputs
-        # return self.inputs.copy()
+    def process_input(self):
+        all_inputs = self.inputs_queue
+        current_inputs = all_inputs[-1]
+        # trigger events -> union of all inputs
+        trigger = set().union(*(input['trigger'] for input in all_inputs))
+        self.inputs['jump'] = 'jump' in trigger
+        self.inputs['fire'] = 'fire' in trigger
+        key_down = set().union(*(input['key_down'] for input in all_inputs))
+        self.inputs['key_down'] = key_down
+        # continuous events -> last input
+        self.inputs['mouse_pos'] = np.array(current_inputs['mouse_pos'])
+        self.inputs['key_pressed'] = current_inputs['key_pressed']
+        self.inputs['horizontal'] = current_inputs['horizontal']
+        self.inputs['vertical'] = current_inputs['vertical']
+        # clear inputs queue
+        current_inputs['key_down'] = set()
+        current_inputs['jump'] = False
+        current_inputs['fire'] = False
+        self.inputs_queue = [current_inputs]
 
-    # def get(self,key):
-    #     return self.inputs.get(key,False)
-
+    def get_mouse_pos(self):
+        return self.inputs['mouse_pos']
+    def get_jump(self):
+        return self.inputs['jump']
+    def get_fire(self):
+        return self.inputs['fire']
+    def get_horizontal(self):
+        return self.inputs['horizontal']
+    def get_vertical(self):
+        return self.inputs['vertical']
+    def get_key_down(self,key):
+        return key in self.inputs['key_down']
+    def get_key_pressed(self,key):
+        return key in self.inputs['key_pressed']
+    
 class Game:
     def __init__(self) -> None:
         pygame.init()
@@ -880,7 +915,7 @@ class Game:
         #     zoom=100
         # )
 
-        self.fps = 10
+        self.fps = 120
 
         self.star_num = 100
         self.star_pos_list = np.random.uniform(0, [self.width,self.height], (self.star_num, 2))
@@ -918,8 +953,10 @@ class Game:
     
         self.players:list[Player] = []
         self.cameras:list[Camera] = []
+        self.controllers:list[NetworkControllerReader] = []
 
     def add_player(self,controller:'NetworkControllerReader'):
+        random_color = np.random.randint(0,255,(3,))
         player = Player(
             pos=np.array([0.5,0.5], dtype=np.float64),
             vel=np.array([0, 0], dtype=np.float64),
@@ -928,7 +965,7 @@ class Game:
             bullet_radius=0.1,
             bullet_lifetime=10,
             map=self.map,
-            color=(255, 255, 255),
+            color=random_color,
             radius=0.2,
             controller=controller,
             game=self
@@ -953,6 +990,9 @@ class Game:
 
     def add_bullet(self,bullet:'Bullet'):
         self.bullets.append(bullet)
+
+    def add_controller(self,controller:'NetworkControllerReader'):
+        self.controllers.append(controller)
 
     def update(self,delta_time):
         for player in self.players:
@@ -992,7 +1032,10 @@ class Game:
 
             camera.draw()
 
-            
+    def process_input(self):
+        for controller in self.controllers:
+            controller.process_input()
+
     async def tick(self):
         delta_time = time.time()-self.current_time
         self.current_time = time.time()
@@ -1005,6 +1048,8 @@ class Game:
         while self.running:
 
             delta_time = await self.tick()
+            
+            self.process_input()
 
             self.update(delta_time)
 
