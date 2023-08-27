@@ -615,15 +615,22 @@ class Server:
 
         self.debug = False
 
+        # use to send close event
+        self.all_writer: list['asyncio.StreamWriter'] = []
+        self.server_task:'asyncio.Server' = None
+
     async def start_server(self):
-        await asyncio.start_server(
+        self.server_task = await asyncio.start_server(
             self.handle_client,
             self.host,
             self.port,
             # limit=self.buffer_limit
             )
 
-    async def handle_client(self,reader, writer):
+    async def handle_client(self,reader:'asyncio.StreamReader'
+                            , writer:'asyncio.StreamWriter'):
+        print(f"new client connented, {writer.get_extra_info('peername')}")
+        self.all_writer.append(writer)
         controller = NetworkControllerReader(self, reader)
         screen = NetworkSurfaceWriter(self, writer)
         player = self.game.add_player(controller)
@@ -631,6 +638,17 @@ class Server:
         player.set_camera(camera)
         self.game.add_controller(controller)
         await controller.listen()
+        print(f"client disconnected, {writer.get_extra_info('peername')}")
+        # after listen, this client is disconnected
+        # clear this client's resources
+        self.game.remove_player(player)
+        self.game.remove_camera(camera)
+        self.game.remove_controller(controller)
+        # writer.close()
+        # await writer.wait_closed()
+        # writer.write(b'see ya')
+
+        self.all_writer.remove(writer)
 
     def send(self,event,writer:'asyncio.StreamWriter'):
         event_dumps = pickle.dumps(event)
@@ -653,8 +671,14 @@ class Server:
             writer.write(data)
             # await writer.drain()
 
+
     async def read_until(self,length,reader:'asyncio.StreamReader'):
         data = await reader.read(length)
+        if not data:
+            return None
+        if data == b'bye':
+            print("bye")
+            return None
         while len(data) != length:
             remaining = length - len(data)
             print(f"read remaining:  {length} - {len(data)} = {remaining}")
@@ -676,6 +700,12 @@ class Server:
             print(f"< length\t{event_length}")
             # print(f"< header\t{header}")
         return event
+    
+    async def close(self):
+        self.server_task.close()
+        for writer in self.all_writer:
+            writer.close()
+            await writer.wait_closed()
 
 class NetworkSurfaceWriter:
     # mimic pygame.Surface
@@ -994,6 +1024,15 @@ class Game:
     def add_controller(self,controller:'NetworkControllerReader'):
         self.controllers.append(controller)
 
+    def remove_player(self,player:'Player'):
+        self.players.remove(player)
+
+    def remove_camera(self,camera:'Camera'):
+        self.cameras.remove(camera)
+
+    def remove_controller(self,controller:'NetworkControllerReader'):
+        self.controllers.remove(controller)
+
     def update(self,delta_time):
         for player in self.players:
             player.update(delta_time)
@@ -1057,13 +1096,14 @@ class Game:
 
             await self.server.drain()
 
+        await self.server.close()
         pygame.quit()
         # self.server.close()
 
 
 if __name__ == '__main__':
     game = Game()
-    asyncio.run(game.run())
+    asyncio.run(game.run(),debug=True)
 
     # import cProfile
     # import pstats

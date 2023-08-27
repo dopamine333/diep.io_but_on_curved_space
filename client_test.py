@@ -575,14 +575,26 @@ class Client:
 
         self.debug = False
 
+        self.connect_timeout = 30
+        self.retry_interval = 5
+
     
     async def connect(self):
-        self.reader,self.writer = await asyncio.open_connection(
-            self.host,
-            self.port,
-            # limit=2
-            # limit=self.buffer_limit
-            )
+        timeout = time.time() + self.connect_timeout
+        while time.time() < timeout:
+            try:
+                self.reader,self.writer = await asyncio.open_connection(
+                    self.host,
+                    self.port,
+                    # limit=2
+                    # limit=self.buffer_limit
+                    )
+                print(f"connect to {self.host}:{self.port} success")
+                return
+            except OSError:
+                print(f"connect to {self.host}:{self.port} failed, retrying...")
+                await asyncio.sleep(self.retry_interval)
+        raise TimeoutError(f"connect to {self.host}:{self.port} timeout")
 
     async def send(self,event):
         event_dumps = pickle.dumps(event)
@@ -601,6 +613,8 @@ class Client:
 
     async def read_until(self,length):
         data = await self.reader.read(length)
+        if not data:
+            return None
         while len(data) != length:
             remaining = length - len(data)
             # print(f"read remaining:  {length} - {len(data)} = {remaining}")
@@ -624,10 +638,22 @@ class Client:
         # print(f"< header\t{header}")
 
         return event
+    
+    async def close(self):
+        self.writer.write(b'bye')
+        await self.writer.drain()
+        # response = b'see ya'
+        # data = await self.reader.read(len(response))
+        # if data != response:
+        #     print(f"close connection failed, response: {data}")
+        # else:
+        #     print(f"close connection success, response: {data}")
+
 
 class NetworkControllerWriter:
     def __init__(self,client:'Client') -> None:
         self.client = client
+        self.quit = False   
 
     async def process_input(self):
         # return False to quit
@@ -645,7 +671,7 @@ class NetworkControllerWriter:
         }
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return False
+                self.quit = True
             # space down or mouse click-> shoot
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
@@ -704,13 +730,18 @@ class NetworkControllerWriter:
             'inputs':inputs
         }
         # print(inputs)
+        # if inputs['trigger']:
+        #     print(inputs['trigger'])
         await self.client.send(event)
-        return True
+
+    def done(self):
+        return self.quit
 
 class NetworkSurfaceReader:
     def __init__(self,client:'Client',screen:'pygame.Surface') -> None:
         self.client = client
         self.screen = screen
+        self.task:asyncio.Task = None
     
     async def listen(self):
         while True:
@@ -718,9 +749,17 @@ class NetworkSurfaceReader:
             if not event:
                 break
             self.process(event)
+        print("listen coroutine done")
 
     def start_listen(self):
-        return asyncio.create_task(self.listen())
+        self.task = asyncio.create_task(self.listen())
+
+    def done(self):
+        return self.task.done()
+    def exception(self):
+        return self.task.exception()
+    def close(self):
+        self.task.cancel()
 
     def process(self,event):
         # pygame.draw.line(self.screen, color, start, end)
@@ -751,7 +790,7 @@ class Game:
         self.screen_surface = pygame.display.set_mode((800, 600))
         self.screen = NetworkSurfaceReader(self.client,self.screen_surface)
 
-        self.fps = 120
+        self.fps = 60
 
     async def tick(self):
         delta_time = time.time()-self.current_time
@@ -760,31 +799,34 @@ class Game:
 
     async def run(self):
         await self.client.connect()
-        listen_task = self.screen.start_listen()
+        self.screen.start_listen()
         self.current_time = time.time()
         while self.running:
             
-            running = await self.controller.process_input()
-            if running == False:
+            await self.controller.process_input()
+            # close pygame window
+            if self.controller.done():
                 self.running = False
 
+            # sleep and wait screen to listen and draw
             await self.tick()
-            # await asyncio.sleep(0)
 
-            if listen_task.done():
-                print(listen_task.exception())
-                self.running = False
-            # self.draw()
-            # listen draw event from server
-            # or pygame.display.update()
-        listen_task.cancel()
+            # # server close connection
+            # if self.screen.done():
+            #     exception = self.screen.exception()
+            #     if exception:
+            #         print(exception)
+            #     self.running = False
+                # self.draw()
+                # listen draw event from server
+                # or pygame.display.update()
+        await self.client.close()
         pygame.quit()
-        # self.client.close()
 
 
 if __name__ == '__main__':
     game = Game()
-    asyncio.run(game.run())
+    asyncio.run(game.run(),debug=True)
     # game.run()
 
     # import cProfile
@@ -810,3 +852,5 @@ if __name__ == '__main__':
     # # Turn profiling off
     # scalene_profiler.stop()
     
+    # TODO:
+    # Graceful close pygame and asyncio connection
